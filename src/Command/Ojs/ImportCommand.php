@@ -2,34 +2,36 @@
 
 namespace ScieloScrapping\Command\Ojs;
 
-use ArticleGalley;
-use Category;
+use APP\category\Category;
+use APP\facades\Repo;
 use OjsSdk\Providers\Ojs\OjsProvider;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
-use DAORegistry;
-use DAOResultFactory;
-use Genre;
-use Journal;
-use JournalDAO;
+use Illuminate\Support\Facades\DB;
+use PKP\galley\Galley;
+use PKP\security\Role;
+use PKP\submission\Genre;
+use APP\journal\Journal;
+use APP\journal\JournalDAO;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
-use Publication;
+use APP\publication\Publication;
 use ScieloScrapping\Service\ArticleService;
-use Section;
-use Services;
+use APP\section\Section;
+use APP\core\Services;
 use SplFileInfo;
-use Submission;
-use SubmissionFile;
+use APP\submission\Submission;
+use PKP\submissionFile\SubmissionFile;
 use Symfony\Component\Console\Exception\RuntimeException;
 use Symfony\Component\Console\Helper\ProgressBar;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Question\ChoiceQuestion;
 use Symfony\Component\Finder\Finder;
-use UserGroup;
-use Application;
+use PKP\userGroup\UserGroup;
+use APP\core\Application;
+use PKP\db\DAORegistry;
 
 class ImportCommand extends Command
 {
@@ -67,7 +69,7 @@ class ImportCommand extends Command
         $this
             ->setDescription('Import all to OJS')
             ->addArgument('slug', InputArgument::REQUIRED, 'Slug of journal')
-            ->addOption('ojs-basedir', null, InputOption::VALUE_REQUIRED, 'Base directory of OJS setup', '/app/ojs')
+            ->addOption('ojs-basedir', null, InputOption::VALUE_REQUIRED, 'Base directory of OJS setup', '/ojs')
             ->addOption('journal-path', null, InputOption::VALUE_REQUIRED, 'Journal to import')
             ->addOption('output', null, InputOption::VALUE_REQUIRED, 'Output directory', 'output')
             ->addOption('default-genre', null, InputOption::VALUE_REQUIRED, 'Default genre key', 'OTHER')
@@ -190,28 +192,16 @@ class ImportCommand extends Command
                 continue;
             }
 
-            if (empty($article->getOjs()['submissionId'])) {
-                $submission = $this->insertSubmission($article);
-            }
+            [$submission, $publication] = $this->insertSubmissionAndPublication($file, $article);
 
-            if (empty($article->getOjs()['publicationId'])) {
-                if (!isset($submission)) {
-                    /** @var SubmissionDAO */
-                    $SubmissionDAO = DAORegistry::getDAO('SubmissionDAO');
-                    $submission = $SubmissionDAO->getById($article->getOjs()['submissionId']);
-                }
-                $publication = $this->insertPublication($file, $article, $submission);
-                $insertCategory = $this->input->getOption('insert-category');
-                if ($insertCategory) {
-                    $this->assignPublicationToCategory($publication, $article->getCategory());
-                }
-                $this->attachFiles($publication, $submission, $article, $file);
+            $insertCategory = $this->input->getOption('insert-category');
+            if ($insertCategory) {
+                $this->assignPublicationToCategory($publication, $article->getCategory());
             }
+            $this->attachFiles($publication, $submission, $article, $file);
 
             // Index article.
-            /** @var SubmissionDAO */
-            $SubmissionDAO = DAORegistry::getDAO('SubmissionDAO');
-            $submission = $SubmissionDAO->getById($submission->getData('id'));
+            $submission = Repo::submission()->get($submission->getId());
             $articleSearchIndex = Application::getSubmissionSearchIndex();
             $articleSearchIndex->submissionMetadataChanged($submission);
             $articleSearchIndex->submissionFilesChanged($submission);
@@ -223,15 +213,14 @@ class ImportCommand extends Command
 
     private function attachFiles(Publication $publication, Submission $submission, ArticleService $article, SplFileInfo $file)
     {
-        $articleGalleyDao = DAORegistry::getDAO('ArticleGalleyDAO'); /* @var $articleGalleyDao ArticleGalleyDAO */
-
         foreach ($article->getFormats() as $format => $langs) {
             foreach (array_keys($langs) as $lang) {
-                $articleGalley = $articleGalleyDao->newDataObject();
-                $articleGalley->setData('publicationId', $publication->getId());
-                $articleGalley->setLabel(strtoupper($format));
-                $articleGalley->setLocale($lang);
-                $articleGalleyDao->insertObject($articleGalley);
+                $galley = Repo::galley()->newDataObject();
+                $galley->setData('publicationId', $publication->getId());
+                $galley->setLabel(strtoupper($format));
+                $galley->setLocale($lang);
+                $galleyId = Repo::galley()->add($galley);
+                $galley = Repo::galley()->get($galleyId);
 
                 switch ($format) {
                     case 'text':
@@ -242,35 +231,33 @@ class ImportCommand extends Command
                         break;
                 }
                 $submissionFile = $this->insertSubmissionFile(
-                    $articleGalley,
+                    $galley,
                     $submission,
                     $article,
                     $lang,
                     $fileName
                 );
-                $articleGalley->setFileId($submissionFile->getId());
-                $articleGalleyDao->updateObject($articleGalley);
+                Repo::galley()->edit($galley, ['submissionFileId' => $submissionFile->getId()]);
             }
         }
     }
 
     private function insertSubmissionFile(
-        ArticleGalley $articleGalley,
+        Galley $galley,
         Submission $submission,
         ArticleService $article,
         string $lang,
         string $fileName
     ): SubmissionFile {
-        $genreId = $this->getDefaultSupplementaryGenre()->getid();
-        $submissionFileDao = DAORegistry::getDAO('SubmissionFileDAO'); /* @var $submissionFileDao SubmissionFileDAO */
+        $genreId = $this->getDefaultSupplementaryGenre()->getId();
 
-        $submissionFile = $submissionFileDao->newDataObject();
+        $submissionFile = Repo::submissionFile()->newDataObject();
         $submissionFile->setData('submissionId', $submission->getId());
-		$submissionFile->setData('locale', $lang);
+        $submissionFile->setData('locale', $lang);
         $submissionFile->setData('genreId', $genreId);
-		$submissionFile->setData('createdAt', $article->getPublished());
+        $submissionFile->setData('createdAt', $article->getPublished());
         $submissionFile->setData('updatedAt', $article->getUpdated());
-        $submissionFile->setData('assocId', $articleGalley->getId());
+        $submissionFile->setData('assocId', $galley->getId());
         $fullFilename = implode(DIRECTORY_SEPARATOR, [
             $article->getBasedir(),
             $article->getBinaryDirectory(),
@@ -282,22 +269,22 @@ class ImportCommand extends Command
         switch ($fileData['extension']) {
             case 'html':
             case 'pdf':
-                $submissionFile->setData('fileStage', SUBMISSION_FILE_PROOF);
-                $submissionFile->setData('assocType', ASSOC_TYPE_REPRESENTATION);
+                $submissionFile->setData('fileStage', SubmissionFile::SUBMISSION_FILE_PROOF);
+                $submissionFile->setData('assocType', Application::ASSOC_TYPE_REPRESENTATION);
 
                 break;
             default:
-                $submissionFile->setData('fileStage', SUBMISSION_FILE_DEPENDENT);
-                $submissionFile->setData('assocType', ASSOC_TYPE_SUBMISSION_FILE);
+                $submissionFile->setData('fileStage', SubmissionFile::SUBMISSION_FILE_DEPENDENT);
+                $submissionFile->setData('assocType', Application::ASSOC_TYPE_SUBMISSION_FILE);
         }
-        $submissionFileDao->insertObject($submissionFile);
+        $submissionFileId = Repo::submissionFile()->add($submissionFile);
+        $submissionFile = Repo::submissionFile()->get($submissionFileId);
         if ($fileData['extension'] == 'html') {
-            $articleGalleyDao = DAORegistry::getDAO('ArticleGalleyDAO'); /* @var $articleGalleyDao ArticleGalleyDAO */
-            $htmlArticleGalley = $articleGalleyDao->newDataObject();
-            $htmlArticleGalley->setId($submissionFile->getId());
+            $htmlGalley = Repo::galley()->newDataObject();
+            $htmlGalley->setId($submissionFile->getId());
             $this->insertSubmissionAttachments(
                 $submissionFile,
-                $htmlArticleGalley,
+                $htmlGalley,
                 $submission,
                 $article,
                 $lang
@@ -310,8 +297,7 @@ class ImportCommand extends Command
     private function insertFile(Submission $submission, string $fileName):array{
         $extension = pathinfo($fileName, PATHINFO_EXTENSION);
         $journal = $this->getJournal();
-        import('classes.core.Services');
-		$submissionDir = Services::get('submissionFile')->getSubmissionDir($journal->getId(), $submission->getId());
+        $submissionDir = Repo::submissionFile()->getSubmissionDir($journal->getId(), $submission->getId());
         $filePath = $submissionDir . '/' . uniqid() . '.' . $extension;
 		$fileId = Services::get('file')->add(
 			$fileName,
@@ -326,7 +312,7 @@ class ImportCommand extends Command
 
     private function insertSubmissionAttachments(
         SubmissionFile $submissionFile,
-        ArticleGalley $articleGalley,
+        Galley $articleGalley,
         Submission $submission,
         ArticleService $article,
         string $lang
@@ -363,7 +349,8 @@ class ImportCommand extends Command
     private function getDefaultSupplementaryGenre(): Genre
     {
         if (!$this->genre) {
-            $genreDao = DAORegistry::getDAO('GenreDAO'); /* @var $genreDao GenreDAO */
+            /** @var GenreDAO */
+            $genreDao = DAORegistry::getDAO('GenreDAO');
             $defaultKey = $this->input->getOption('default-genre');
             $this->genre = $genreDao->getByKey($defaultKey);
             if (!$this->genre) {
@@ -381,25 +368,29 @@ class ImportCommand extends Command
         return $this->genre;
     }
 
-    private function insertPublication(SplFileInfo $file, ArticleService &$article, ?Submission $submission)
+    /**
+     * @return array{0: Submission, 1: Publication}
+     */
+    private function insertSubmissionAndPublication(SplFileInfo $file, ArticleService &$article): array
     {
-        /**
-         * @var SubmissionDAO
-         */
-        $SubmissionDAO = DAORegistry::getDAO('SubmissionDAO');
-        /**
-         * @var PublicationDAO
-         */
-        $PublicationDAO = DAORegistry::getDAO('PublicationDAO');
+        $journal = $this->getJournal();
         $issue = $this->getIssueByFile($file);
 
-        $publication = $PublicationDAO->newDataObject();
-        $publication->setData('submissionId', $article->getOjs()['submissionId']);
-        $publication->setData('status', STATUS_PUBLISHED);
+        $submission = Repo::submission()->newDataObject();
+        $submission->setData('contextId', 1); // Journal = CSP
+        $submission->setData('status', Submission::STATUS_PUBLISHED);
+        $submission->setData('stageId', WORKFLOW_STAGE_ID_PRODUCTION);
+        $submission->setData('dateLastActivity', str_pad($article->getUpdated(), 10, '-01', STR_PAD_RIGHT));
+        $submission->setData('dateSubmitted', str_pad($article->getPublished(), 10, '-01', STR_PAD_RIGHT));
+        $submission->setData('lastModified', str_pad($article->getUpdated(), 10, '-01', STR_PAD_RIGHT));
+        $submission->setData('submissionProgress', ''); // '' means complete (submissionProgress is a string as of OJS 3.4)
+        $submission->setData('locale', $article->getFirstLanguage());
+
+        $publication = Repo::publication()->newDataObject();
+        $publication->setData('status', Submission::STATUS_PUBLISHED);
         $publication->setData('issueId', $issue['issueId']);
         $publication->setData('locale', $this->identifyPrimaryLanguage($article));
         $publication->setData('pub-id::doi', $article->getDoi());
-        $publication->setData('version', 1);
         $publication->setData('copyrightYear', substr($article->getPublished(), 0, 4));
         $publication->setData('datePublished', $article->getPublished());
         $publication->setData('lastModified', $article->getUpdated());
@@ -417,28 +408,22 @@ class ImportCommand extends Command
             $publication->setData('sectionId', $section->getId());
         }
 
-        $article->setOjs(array_merge(
-            $article->getOjs(),
-            ['publicationId' => $PublicationDAO->insertObject($publication)]
-        ));
+        $submissionId = Repo::submission()->add($submission, $publication, $journal);
+        $submission = Repo::submission()->get($submissionId);
+        $publication = Repo::publication()->get($submission->getData('currentPublicationId'));
+
+        $article->setOjs(array_merge($article->getOjs(), [
+            'submissionId' => $submissionId,
+            'publicationId' => $publication->getId(),
+        ]));
 
         $this->insertAuthor($publication, $article);
 
-        if (!$submission) {
-            $submission = $SubmissionDAO->getById($article->getOjs()['submissionId']);
-        }
-        $submission->setData('currentPublicationId', $article->getOjs()['publicationId']);
-        $SubmissionDAO->updateObject($submission);
-        return $publication;
+        return [$submission, $publication];
     }
 
     private function insertAuthor(Publication $publication, ArticleService $article)
     {
-        /**
-         * @var PublicationDAO
-         */
-        $PublicationDAO = DAORegistry::getDAO('PublicationDAO');
-        $authorDao = DAORegistry::getDAO('AuthorDAO'); /** @var $authorDao AuthorDAO */
         $lang = $this->identifyPrimaryLanguage($article);
         foreach ($article->getAuthors() as $key => $row) {
             if (!isset($row['name'])) {
@@ -448,7 +433,7 @@ class ImportCommand extends Command
                 ]);
                 continue;
             }
-            $author = $authorDao->newDataObject(); /** @var $author PKPAuthor */
+            $author = Repo::author()->newDataObject();
             $author->setData('publicationId', $publication->getId());
             $author->setData('seq', $key);
             $author->setGivenName($row['name'], $lang);
@@ -471,10 +456,9 @@ class ImportCommand extends Command
                 $author->setPrimaryContact(true);
             }
             $author->setIncludeInBrowse(true);
-            $authorDao->insertObject($author);
+            $authorId = Repo::author()->add($author);
             if ($key == 0) {
-                $publication->setData('primaryContactId', $author->getId());
-                $PublicationDAO->updateObject($publication);
+                Repo::publication()->edit($publication, ['primaryContactId' => $authorId]);
             }
         }
     }
@@ -483,80 +467,62 @@ class ImportCommand extends Command
     {
         if (!$this->authorGroup) {
             $journal = $this->getJournal();
-            $userGroupDao = DAORegistry::getDAO('UserGroupDAO'); /* @var $userGroupDao UserGroupDAO */
-            $this->authorGroup = $userGroupDao->getDefaultByRoleId($journal->getId(), ROLE_ID_AUTHOR);
+            $this->authorGroup = Repo::userGroup()
+                ->getByRoleIds([Role::ROLE_ID_AUTHOR], $journal->getId(), true)
+                ->first();
         }
         return $this->authorGroup;
-    }
-
-    private function insertSubmission(ArticleService &$article)
-    {
-        /**
-         * @var SubmissionDAO
-         */
-        $SubmissionDAO = DAORegistry::getDAO('SubmissionDAO');
-        /**
-         * @var Submission
-         */
-        $submission = $SubmissionDAO->newDataObject();
-        $submission->setData('contextId', 1); // Journal = CSP
-        $submission->setData('status', STATUS_PUBLISHED);
-        $submission->setData('stageId', WORKFLOW_STAGE_ID_PRODUCTION);
-        $submission->setData('dateLastActivity', str_pad($article->getUpdated(), 10, '-01', STR_PAD_RIGHT));
-        $submission->setData('dateSubmitted', str_pad($article->getPublished(), 10, '-01', STR_PAD_RIGHT));
-        $submission->setData('lastModified', str_pad($article->getUpdated(), 10, '-01', STR_PAD_RIGHT));
-        $submission->setData('submissionProgress', 0); // ==0 means complete
-        $submission->setData('locale', $article->getFirstLanguage());
-        $article->setOjs(array_merge(
-            $article->getOjs(),
-            ['submissionId' => $SubmissionDAO->insertObject($submission)]
-        ));
-        return $submission;
     }
 
     private function getSection($name)
     {
         if (!isset($this->section[$name])) {
             $journal = $this->getJournal();
-            $sectionDao = DAORegistry::getDAO('SectionDAO'); /* @var $sectionDao SectionDAO */
-            $this->section[$name] = $sectionDao->getByTitle($name, $journal->getId());
-            if (empty($this->section[$name])) {
+            $section = Repo::section()->getCollector()
+                ->filterByContextIds([$journal->getId()])
+                ->filterByTitles([$name])
+                ->getMany()
+                ->first();
+            if (!$section) {
                 $langs = $journal->getSupportedLocales();
-                $this->section[$name] = $sectionDao->newDataObject();
-                $this->section[$name]->setContextId($journal->getId());
+                $section = Repo::section()->newDataObject();
+                $section->setContextId($journal->getId());
                 foreach ($langs as $lang) {
-                    $this->section[$name]->setTitle($name, $lang);
+                    $section->setTitle($name, $lang);
                 }
-                $sectionDao->insertObject($this->section[$name]);
+                Repo::section()->add($section);
             }
+            $this->section[$name] = $section;
         }
         return $this->section[$name];
     }
 
     private function assignPublicationToCategory(Publication $publication, string $categoryName)
     {
-        $categoryDao = DAORegistry::getDAO('CategoryDAO'); /* @var $categoryDao CategoryDAO */
         $category = $this->getCategory($categoryName);
-        $categoryDao->insertPublicationAssignment($category->getId(), $publication->getId());
+        Repo::category()->dao->insertPublicationAssignment($category->getId(), $publication->getId());
     }
 
     private function getCategory($name)
     {
         if (!isset($this->category[$name])) {
             $journal = $this->getJournal();
-            $categoryDao = DAORegistry::getDAO('CategoryDAO'); /* @var $categoryDao CategoryDAO */
-            $this->category[$name] = $categoryDao->getByTitle($name, $journal->getId());
-            if (!$this->category[$name]) {
+            $category = Repo::category()->getCollector()
+                ->filterByContextIds([$journal->getId()])
+                ->filterByPaths([$name])
+                ->getMany()
+                ->first();
+            if (!$category) {
                 $langs = $journal->getSupportedLocales();
-                $category = $categoryDao->newDataObject();
+                $category = Repo::category()->newDataObject();
                 $category->setContextId($journal->getId());
                 $category->setPath($name);
                 foreach ($langs as $lang) {
                     $category->setTitle($name, $lang);
                 }
-                $categoryDao->insertObject($category);
-                $this->category[$name] = $category;
+                Repo::category()->add($category);
             }
+            $this->category[$name] = $category;
         }
         return $this->category[$name];
     }
@@ -574,10 +540,6 @@ class ImportCommand extends Command
     {
         $journal = $this->getJournal();
         $langs = $journal->getSupportedLocales();
-        /**
-         * @var IssueDAO
-         */
-        $issueDAO = DAORegistry::getDAO('IssueDAO');
 
         $total = $this->countIssues();
         if (!$total) {
@@ -596,14 +558,14 @@ class ImportCommand extends Command
                             continue;
                         }
                         $issuesFromDatabase = $this->getIssueFromDb($journal->getId(), $volume, $year, $attr['text']);
-                        if ($issuesFromDatabase->getCount()) {
-                            $issue = $issuesFromDatabase->next();
+                        if (count($issuesFromDatabase)) {
+                            $issue = $issuesFromDatabase[0];
                             $this->setGridAttribute($issue->getYear(), $issue->getvolume(), $issueName, 'issueId', $issue->getId());
                             $this->progressBar->advance();
                             continue;
                         }
                         // Insert issue
-                        $issue = $issueDAO->newDataObject();
+                        $issue = Repo::issue()->newDataObject();
                         $issue->setJournalId($journal->getId());
                         $issue->setVolume($volume);
                         $issue->setShowVolume(1);
@@ -616,7 +578,7 @@ class ImportCommand extends Command
                         }
                         $issue->setShowTitle(1);
                         $issue->setPublished(1);
-                        $issueId = $issueDAO->insertObject($issue);
+                        $issueId = Repo::issue()->add($issue);
                         $this->setGridAttribute($year, $volume, $issueName, 'issueId', $issueId);
                         $this->progressBar->advance();
                     }
@@ -627,35 +589,31 @@ class ImportCommand extends Command
     }
 
     /**
-     * @param integer $journalId
-     * @param integer $volume
-     * @param integer $year
-     * @param string $title
-     * @return DAOResultFactory[Issue]
+     * @return \APP\issue\Issue[]
      */
-    private function getIssueFromDb(int $journalId, int $volume, int $year, string $title): DAOResultFactory
+    private function getIssueFromDb(int $journalId, int $volume, int $year, string $title): array
     {
-        /**
-         * @var IssueDAO
-         */
-        $issueDAO = DAORegistry::getDAO('IssueDAO');
+        $like = str_replace('.', '%', strtolower($title));
+        $issueIds = DB::table('issues as i')
+            ->leftJoin('issue_settings as iss1', function ($join) {
+                $join->on('i.issue_id', '=', 'iss1.issue_id')
+                    ->where('iss1.setting_name', '=', 'title');
+            })
+            ->where('i.journal_id', $journalId)
+            ->where('i.volume', $volume)
+            ->where('i.year', $year)
+            ->where(function ($query) use ($like) {
+                $query->whereRaw('LOWER(i.number) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(iss1.setting_value) LIKE ?', [$like]);
+            })
+            ->distinct()
+            ->pluck('i.issue_id');
 
-        $sqlTitleJoin = ' LEFT JOIN issue_settings iss1 ON (i.issue_id = iss1.issue_id AND iss1.setting_name = \'title\')';
-        $params[] = (int) $journalId;
-        $params[] = (int) $volume;
-        $params[] = (int) $year;
-        $params[] = str_replace('.', '%', strtolower($title));
-        $params[] = str_replace('.', '%', strtolower($title));
-        $sql =
-            'SELECT i.*
-            FROM issues i'
-            . $sqlTitleJoin
-            . ' WHERE i.journal_id = ?'
-            . ' AND i.volume = ?'
-            . ' AND i.year = ?'
-            . ' AND (LOWER(i.number) LIKE ? OR LOWER(iss1.setting_value) LIKE ?)';
-        $result = $issueDAO->retrieve($sql, $params);
-        return new DAOResultFactory($result, $issueDAO, '_returnIssueFromRow', [], $sql, $params);
+        return $issueIds
+            ->map(fn ($issueId) => Repo::issue()->get((int) $issueId))
+            ->filter()
+            ->values()
+            ->all();
     }
 
     /**
