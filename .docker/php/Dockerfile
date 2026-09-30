@@ -1,4 +1,4 @@
-FROM php:7.4-fpm
+FROM php:8.2-fpm
 
 RUN apt-get update -y && \
     apt-get install -y \
@@ -13,7 +13,7 @@ RUN docker-php-ext-configure intl \
     && docker-php-ext-install gettext \
     && docker-php-ext-install intl
 
-RUN pecl install xdebug-2.9.8 \
+RUN pecl install xdebug-3.2.2 \
     && docker-php-ext-enable xdebug
 
 # Install MySQL PDO
