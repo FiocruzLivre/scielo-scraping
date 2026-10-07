@@ -442,7 +442,11 @@ class ImportCommand extends Command
             $author = Repo::author()->newDataObject();
             $author->setData('publicationId', $publication->getId());
             $author->setData('seq', $key);
-            $author->setGivenName($row['name'], $lang);
+            [$familyName, $givenName] = $this->splitAuthorName($row['name']);
+            if ($familyName !== '') {
+                $author->setFamilyName($familyName, $lang);
+            }
+            $author->setGivenName($givenName, $lang);
             $author->setData('userGroupId', $this->getAuthorGroup()->getId());
             if (!empty($row['decreased'])) {
                 $author->setData('authorContribution', $row['decreased']);
@@ -785,6 +789,24 @@ class ImportCommand extends Command
             }
         }
         return $lang;
+    }
+
+    /**
+     * SciELO's citation_author meta tag (the scraper's source for author
+     * names) uses the standard bibliographic "Family name(s), Given name(s)"
+     * convention. Splitting it is what lets OJS sort/cite authors correctly
+     * (e.g. "Koifman S" instead of the whole string); every name scraped
+     * from issue 66 followed this convention with zero exceptions.
+     *
+     * @return array{0: string, 1: string} [familyName, givenName]
+     */
+    private function splitAuthorName(string $name): array
+    {
+        if (!str_contains($name, ',')) {
+            return ['', trim($name)];
+        }
+        [$family, $given] = explode(',', $name, 2);
+        return [trim($family), trim($given)];
     }
 
     private function identifyPrimaryLanguage($article)
