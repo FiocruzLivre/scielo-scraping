@@ -73,7 +73,7 @@ class ImportCommand extends Command
             ->addOption('journal-path', null, InputOption::VALUE_REQUIRED, 'Journal to import')
             ->addOption('output', null, InputOption::VALUE_REQUIRED, 'Output directory', 'output')
             ->addOption('default-genre', null, InputOption::VALUE_REQUIRED, 'Default genre key', 'OTHER')
-            ->addOption('copy-category-to-section', null, InputOption::VALUE_NONE, 'Insert all category as section')
+            ->addOption('default-section', null, InputOption::VALUE_REQUIRED, 'Section title used when the article category has no known mapping', 'Artigo')
             ->addOption('insert-category', null, InputOption::VALUE_NONE, 'Insert category')
             ->addOption('import-without-keywords', null, InputOption::VALUE_NONE, 'Import without keywords')
             ->addOption('import-without-binaries', null, InputOption::VALUE_NONE, 'Import without binaries');
@@ -402,11 +402,12 @@ class ImportCommand extends Command
             $publication->setData('abstract', $resume, $lang);
         }
 
-        $copyCategoryToSection = $this->input->getOption('copy-category-to-section');
-        if ($copyCategoryToSection) {
-            $section = $this->getSection($article->getCategory());
-            $publication->setData('sectionId', $section->getId());
-        }
+        // A publication with no sectionId is silently dropped from the issue's
+        // table of contents by IssueHandler - not an import error, just invisible
+        // content - so every publication must get one, not just those where a
+        // flag happened to be passed.
+        $section = $this->getSection($this->resolveSectionTitle($article));
+        $publication->setData('sectionId', $section->getId());
 
         $submissionId = Repo::submission()->add($submission, $publication, $journal);
         $submission = Repo::submission()->get($submissionId);
@@ -472,6 +473,41 @@ class ImportCommand extends Command
                 ->first();
         }
         return $this->authorGroup;
+    }
+
+    /**
+     * Maps SciELO's citation_article_type values (NISO JATS vocabulary, in
+     * English) to this journal's actual section titles (in Portuguese).
+     * Anything not listed here falls back to the --default-section option.
+     */
+    private const CATEGORY_SECTION_MAP = [
+        'research-article' => 'Artigo',
+        'review-article' => 'Revisão',
+        'editorial' => 'Editorial',
+        'letter' => 'Carta',
+        'brief-report' => 'Comunicação breve',
+        'obituary' => 'Obituário',
+        'retraction' => 'Retraction',
+        'correction' => 'Errata',
+        'article-commentary' => 'Comentários',
+        'interview' => 'Entrevista',
+        // hardcoded fallback value from the one-off issue-66 recovery script
+        'artigo' => 'Artigo',
+    ];
+
+    private function resolveSectionTitle(ArticleService $article): string
+    {
+        $category = strtolower(trim((string) $article->getCategory()));
+        if (isset(self::CATEGORY_SECTION_MAP[$category])) {
+            return self::CATEGORY_SECTION_MAP[$category];
+        }
+        $default = $this->input->getOption('default-section');
+        $this->logger->warning('Unmapped article category, using default section', [
+            'method' => 'ImportCommand::resolveSectionTitle',
+            'category' => $article->getCategory(),
+            'default' => $default,
+        ]);
+        return $default;
     }
 
     private function getSection($name)
