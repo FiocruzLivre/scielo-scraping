@@ -218,7 +218,8 @@ class ImportCommand extends Command
                 $galley = Repo::galley()->newDataObject();
                 $galley->setData('publicationId', $publication->getId());
                 $galley->setLabel(strtoupper($format));
-                $galley->setLocale($lang);
+                $ojsLocale = $this->normalizeLocale($lang);
+                $galley->setLocale($ojsLocale);
                 $galleyId = Repo::galley()->add($galley);
                 $galley = Repo::galley()->get($galleyId);
 
@@ -234,7 +235,7 @@ class ImportCommand extends Command
                     $galley,
                     $submission,
                     $article,
-                    $lang,
+                    $ojsLocale,
                     $fileName
                 );
                 Repo::galley()->edit($galley, ['submissionFileId' => $submissionFile->getId()]);
@@ -384,22 +385,26 @@ class ImportCommand extends Command
         $submission->setData('dateSubmitted', str_pad($article->getPublished(), 10, '-01', STR_PAD_RIGHT));
         $submission->setData('lastModified', str_pad($article->getUpdated(), 10, '-01', STR_PAD_RIGHT));
         $submission->setData('submissionProgress', ''); // '' means complete (submissionProgress is a string as of OJS 3.4)
-        $submission->setData('locale', $article->getFirstLanguage());
+        $submission->setData('locale', $this->normalizeLocale($article->getFirstLanguage()));
 
         $publication = Repo::publication()->newDataObject();
         $publication->setData('status', Submission::STATUS_PUBLISHED);
         $publication->setData('issueId', $issue['issueId']);
-        $publication->setData('locale', $this->identifyPrimaryLanguage($article));
+        $publication->setData('locale', $this->normalizeLocale($this->identifyPrimaryLanguage($article)));
         $publication->setData('pub-id::doi', $article->getDoi());
         $publication->setData('copyrightYear', substr($article->getPublished(), 0, 4));
         $publication->setData('datePublished', $article->getPublished());
         $publication->setData('lastModified', $article->getUpdated());
-        $publication->setData('keywords', $article->getKeywords());
+        $keywords = [];
+        foreach ($article->getKeywords() as $lang => $keywordList) {
+            $keywords[$this->normalizeLocale($lang)] = $keywordList;
+        }
+        $publication->setData('keywords', $keywords);
         foreach ($article->getTitle() as $lang => $title) {
-            $publication->setData('title', $title, $lang);
+            $publication->setData('title', $title, $this->normalizeLocale($lang));
         }
         foreach ($article->getResume() as $lang => $resume) {
-            $publication->setData('abstract', $resume, $lang);
+            $publication->setData('abstract', $resume, $this->normalizeLocale($lang));
         }
 
         // A publication with no sectionId is silently dropped from the issue's
@@ -425,7 +430,7 @@ class ImportCommand extends Command
 
     private function insertAuthor(Publication $publication, ArticleService $article)
     {
-        $lang = $this->identifyPrimaryLanguage($article);
+        $lang = $this->normalizeLocale($this->identifyPrimaryLanguage($article));
         foreach ($article->getAuthors() as $key => $row) {
             if (!isset($row['name'])) {
                 $this->logger->error('Author Name', [
@@ -754,6 +759,32 @@ class ImportCommand extends Command
             throw new RuntimeException('Configure default email of journal: settings > context > contacts');
         }
         return $this->journal;
+    }
+
+    /**
+     * The scraper produces standard OJS locale codes (en_US, es_ES, pt_BR),
+     * but this journal's configured supportedLocales are ["pt_BR","en","es"]
+     * - short codes for en/es. Templates that gate on an exact match against
+     * the journal's locale set (e.g. the PDF galley link in the csp theme's
+     * aside.tpl) never match "en_US"/"es_ES", so the content silently fails
+     * to render even though the data imported without any error.
+     */
+    private function normalizeLocale(?string $lang): ?string
+    {
+        if (!$lang) {
+            return $lang;
+        }
+        $supported = $this->getJournal()->getSupportedLocales();
+        if (in_array($lang, $supported, true)) {
+            return $lang;
+        }
+        $base = substr($lang, 0, 2);
+        foreach ($supported as $locale) {
+            if (substr($locale, 0, 2) === $base) {
+                return $locale;
+            }
+        }
+        return $lang;
     }
 
     private function identifyPrimaryLanguage($article)
