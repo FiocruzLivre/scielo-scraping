@@ -89,14 +89,8 @@ class Article extends ArticleService
     public function loadFromArticlePage(string $journalSlug, string $id, string $listedLang): self
     {
         $url = "/j/{$journalSlug}/a/{$id}/?lang={$listedLang}&ilang=pt_BR";
-        try {
-            $crawler = $this->getBrowser()->request('GET', $url);
-            if ($this->getBrowser()->getResponse()->getStatusCode() == 404) {
-                $this->logger->error('404', ['method' => 'Article::loadFromArticlePage', 'id' => $id, 'url' => $url]);
-                return $this;
-            }
-        } catch (TimeoutException $th) {
-            $this->logger->error('timeout', ['method' => 'Article::loadFromArticlePage', 'id' => $id, 'url' => $url]);
+        $crawler = $this->fetchPage($url, $id);
+        if (!$crawler) {
             return $this;
         }
 
@@ -107,28 +101,6 @@ class Article extends ArticleService
         }
         $this->setDoi($doi);
         $this->setCategory(strtolower($this->metaContent($crawler, 'citation_article_type') ?: 'article'));
-
-        $langMap = ['pt' => 'pt_BR', 'en' => 'en_US', 'es' => 'es_ES'];
-        $lang = $langMap[$this->metaContent($crawler, 'citation_language') ?? $listedLang] ?? $listedLang;
-
-        $title = $this->metaContent($crawler, 'citation_title');
-        if ($title) {
-            $this->setTitle($title, $lang);
-        } else {
-            $this->logger->error('Without Title', ['method' => 'Article::loadFromArticlePage', 'id' => $id]);
-        }
-
-        $abstract = $this->metaContent($crawler, 'citation_abstract');
-        if ($abstract) {
-            $this->setResume($abstract, $lang);
-        }
-
-        $keywords = $this->metaContentAll($crawler, 'citation_keywords');
-        if ($keywords) {
-            $this->setKeywords($keywords, $lang);
-        } else {
-            $this->logger->error('Without keywords', ['method' => 'Article::loadFromArticlePage', 'id' => $id]);
-        }
 
         $pubDate = $this->metaContent($crawler, 'citation_publication_date');
         if ($pubDate) {
@@ -153,13 +125,79 @@ class Article extends ArticleService
             $this->setAuthors($authors);
         }
 
+        $lang = $this->extractLanguageMetadata($crawler, $listedLang, $id);
+
         $formats = ['pdf' => [$lang => "/j/{$journalSlug}/a/{$id}/?format=pdf&lang={$listedLang}"]];
         if ($crawler->filter('#standalonearticle')->count() > 0) {
             $formats['text'] = [$lang => $url];
         }
+
+        // Some articles have full text in only one language but are still
+        // indexed with a translated title/abstract/keywords for the others -
+        // SciELO exposes those via a separate, lightweight /abstract/ page
+        // per language rather than on the main article page itself.
+        $otherLangs = [];
+        $crawler->filter('a[href*="/abstract/"]')->each(function (Crawler $a) use (&$otherLangs, $listedLang) {
+            $href = $a->attr('href');
+            parse_str((string) parse_url($href, PHP_URL_QUERY), $query);
+            $otherLang = $query['lang'] ?? null;
+            if ($otherLang && $otherLang !== $listedLang) {
+                $otherLangs[$otherLang] = true;
+            }
+        });
+        foreach (array_keys($otherLangs) as $otherListedLang) {
+            $abstractUrl = "/j/{$journalSlug}/a/{$id}/abstract/?lang={$otherListedLang}&ilang=pt_BR";
+            $abstractCrawler = $this->fetchPage($abstractUrl, $id);
+            if ($abstractCrawler) {
+                $this->extractLanguageMetadata($abstractCrawler, $otherListedLang, $id);
+            }
+        }
+
         $this->setFormats($formats);
 
         return $this;
+    }
+
+    private function fetchPage(string $url, string $id): ?Crawler
+    {
+        try {
+            $crawler = $this->getBrowser()->request('GET', $url);
+            if ($this->getBrowser()->getResponse()->getStatusCode() == 404) {
+                $this->logger->error('404', ['method' => 'Article::loadFromArticlePage', 'id' => $id, 'url' => $url]);
+                return null;
+            }
+            return $crawler;
+        } catch (TimeoutException $th) {
+            $this->logger->error('timeout', ['method' => 'Article::loadFromArticlePage', 'id' => $id, 'url' => $url]);
+            return null;
+        }
+    }
+
+    private function extractLanguageMetadata(Crawler $crawler, string $listedLang, string $id): string
+    {
+        $langMap = ['pt' => 'pt_BR', 'en' => 'en_US', 'es' => 'es_ES'];
+        $lang = $langMap[$this->metaContent($crawler, 'citation_language') ?? $listedLang] ?? $listedLang;
+
+        $title = $this->metaContent($crawler, 'citation_title');
+        if ($title) {
+            $this->setTitle($title, $lang);
+        } else {
+            $this->logger->error('Without Title', ['method' => 'Article::extractLanguageMetadata', 'id' => $id, 'lang' => $lang]);
+        }
+
+        $abstract = $this->metaContent($crawler, 'citation_abstract');
+        if ($abstract) {
+            $this->setResume($abstract, $lang);
+        }
+
+        $keywords = $this->metaContentAll($crawler, 'citation_keywords');
+        if ($keywords) {
+            $this->setKeywords($keywords, $lang);
+        } else {
+            $this->logger->error('Without keywords', ['method' => 'Article::extractLanguageMetadata', 'id' => $id, 'lang' => $lang]);
+        }
+
+        return $lang;
     }
 
     private function metaContent(Crawler $crawler, string $name): ?string
