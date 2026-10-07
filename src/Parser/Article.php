@@ -78,113 +78,99 @@ class Article extends ArticleService
     }
 
     /**
-     * Get all article metadata
-     *
-     * @param Crawler $crawler
-     * @return Article
+     * Fetch an article's own page and populate everything about it: doi,
+     * title, abstract, keywords, authors, dates, and the pdf/text format
+     * URLs. The current www.scielo.br template carries none of this on the
+     * issue listing page (unlike the old template), but keeps standard
+     * citation_* meta tags on the article page itself - the same convention
+     * search engines rely on, which is presumably why it survived the
+     * redesign even though the surrounding markup didn't.
      */
-    private function incrementMetadata(Crawler $crawler, string $currentLang)
+    public function loadFromArticlePage(string $journalSlug, string $id, string $listedLang): self
     {
-        if (!$this->getDoi()) {
-            $nodes = $crawler->filter('meta[name="citation_doi"]');
-            if ($nodes->count()) {
-                $this->setDoi($nodes->attr('content'));
-            } else {
-                $this->logger->error('Without DOI', [
-                    'method' => 'ScieloClient::getArticleMetadata',
-                    'directory' => $this->getBasedir()
-                ]);
+        $url = "/j/{$journalSlug}/a/{$id}/?lang={$listedLang}&ilang=pt_BR";
+        try {
+            $crawler = $this->getBrowser()->request('GET', $url);
+            if ($this->getBrowser()->getResponse()->getStatusCode() == 404) {
+                $this->logger->error('404', ['method' => 'Article::loadFromArticlePage', 'id' => $id, 'url' => $url]);
+                return $this;
             }
+        } catch (TimeoutException $th) {
+            $this->logger->error('timeout', ['method' => 'Article::loadFromArticlePage', 'id' => $id, 'url' => $url]);
+            return $this;
         }
-        $nodes = $crawler->filter('meta[name="citation_title"]');
-        if ($nodes->count()) {
-            $this->setTitle($nodes->attr('content'), $currentLang);
-            $titlesExtra = $crawler->filter('h2[class="article-title"]')->each(function ($node, $i) {return $node->text();});
 
-            if($currentLang == "pt_BR"){
-                $langs = ["en_US", "es_ES"];
-            }
-            if($currentLang == "en_US"){
-                if(count($titlesExtra) > 1){
-                    $langs = ["pt_BR", "es_ES"];
-                }else{
-                    $langs = ["pt_BR"];
-                }
-            }
-            if($currentLang == "es_ES"){
-                if(count($titlesExtra) > 1){
-                    $langs = ["en_US", "pt_BR"];
-                }else{
-                    $langs = ["pt_BR"];
-                }
-            }
-            if($titlesExtra){
-                foreach($titlesExtra as $key => $value){
-                    $this->setTitle($value, $langs[$key]);
-                    next($langs);
-                }
-            }
+        $doi = $this->metaContent($crawler, 'citation_doi');
+        if (!$doi) {
+            $this->logger->error('Without DOI', ['method' => 'Article::loadFromArticlePage', 'id' => $id]);
+            return $this;
+        }
+        $this->setDoi($doi);
+        $this->setCategory(strtolower($this->metaContent($crawler, 'citation_article_type') ?: 'article'));
+
+        $langMap = ['pt' => 'pt_BR', 'en' => 'en_US', 'es' => 'es_ES'];
+        $lang = $langMap[$this->metaContent($crawler, 'citation_language') ?? $listedLang] ?? $listedLang;
+
+        $title = $this->metaContent($crawler, 'citation_title');
+        if ($title) {
+            $this->setTitle($title, $lang);
         } else {
-            $this->logger->error('Without Title', [
-                'method' => 'ScieloClient::getArticleMetadata',
-                'directory' => $this->getBasedir()
-            ]);
+            $this->logger->error('Without Title', ['method' => 'Article::loadFromArticlePage', 'id' => $id]);
         }
-        if (!$this->getPublished()) {
-            $nodes = $crawler->filter('meta[name="citation_publication_date"]');
-            if ($nodes->count()) {
-                $this->setPublished($nodes->attr('content'));
-            } else {
-                $this->logger->error('Without publication_date', [
-                    'method' => 'ScieloClient::getArticleMetadata',
-                    'directory' => $this->getBasedir()
-                ]);
-            }
+
+        $abstract = $this->metaContent($crawler, 'citation_abstract');
+        if ($abstract) {
+            $this->setResume($abstract, $lang);
         }
-        if (!$this->getKeywords($currentLang)) {
-            $nodes = $crawler->filter('meta[name="citation_keywords"]');
-            if ($nodes->count()) {
-                $this->setKeywords($nodes->each(fn($meta) => $meta->attr('content')), $currentLang);
-            } else {
-                $this->logger->error('Without keywords', [
-                    'method' => 'ScieloClient::getArticleMetadata',
-                    'directory' => $this->getBasedir()
-                ]);
-            }
+
+        $keywords = $this->metaContentAll($crawler, 'citation_keywords');
+        if ($keywords) {
+            $this->setKeywords($keywords, $lang);
+        } else {
+            $this->logger->error('Without keywords', ['method' => 'Article::loadFromArticlePage', 'id' => $id]);
         }
-        $authors = $crawler->filter('.contribGroup span[class="dropdown"]')->each(function ($node) {
-            $return = [];
-            $name = $node->filter('[id*="contribGroupTutor"] span');
-            if ($name->count()) {
-                $return['name'] = $name->text();
+
+        $pubDate = $this->metaContent($crawler, 'citation_publication_date');
+        if ($pubDate) {
+            $pubDate = preg_match('/^\d{4}$/', $pubDate) ? $pubDate . '-01-01 00:00:00' : $pubDate;
+            $this->setPublished($pubDate);
+            $this->setUpdated($pubDate);
+        } else {
+            $this->logger->error('Without publication_date', ['method' => 'Article::loadFromArticlePage', 'id' => $id]);
+        }
+
+        $authorNames = $this->metaContentAll($crawler, 'citation_author');
+        $authorAffils = $this->metaContentAll($crawler, 'citation_author_affiliation');
+        $authors = [];
+        foreach ($authorNames as $i => $name) {
+            $row = ['name' => $name];
+            if (isset($authorAffils[$i]) && $authorAffils[$i] !== '') {
+                $row['foundation'] = $authorAffils[$i];
             }
-            $orcid = $node->filter('[class*="orcid"]');
-            if ($orcid->count()) {
-                $return['orcid'] = $orcid->attr('href');
-            }
-            foreach ($node->filter('ul') as $nodeElement) {
-                if ($nodeElement->childNodes->count() <= 1) {
-                    continue;
-                }
-                $text = trim(preg_replace('!\s+!', ' ', $nodeElement->childNodes->item(1)->nodeValue));
-                switch ($text) {
-                    case '†':
-                        $return['decreased'] = 'decreased';
-                        $this->logger->error('Author decreased', [
-                            'method' => 'ScieloClient::getArticleMetadata',
-                            'article' => $this->getBasedir()
-                        ]);
-                        break;
-                    default:
-                        $return['foundation'] = $text;
-                }
-            }
-            return $return;
-        });
+            $authors[] = $row;
+        }
         if ($authors) {
             $this->setAuthors($authors);
         }
+
+        $formats = ['pdf' => [$lang => "/j/{$journalSlug}/a/{$id}/?format=pdf&lang={$listedLang}"]];
+        if ($crawler->filter('#standalonearticle')->count() > 0) {
+            $formats['text'] = [$lang => $url];
+        }
+        $this->setFormats($formats);
+
         return $this;
+    }
+
+    private function metaContent(Crawler $crawler, string $name): ?string
+    {
+        $all = $this->metaContentAll($crawler, $name);
+        return $all[0] ?? null;
+    }
+
+    private function metaContentAll(Crawler $crawler, string $name): array
+    {
+        return $crawler->filter("meta[name=\"{$name}\"]")->each(fn (Crawler $m) => $m->attr('content'));
     }
 
     private function getRawCrawler(string $url, string $lang)
@@ -231,8 +217,8 @@ class Article extends ArticleService
         $crawler->filter('img')->each(function ($img) use ($path) {
             $src = $img->attr('src');
 
-            if (str_starts_with($src, "/media/assets/csp/")){
-                $filename = $path . DIRECTORY_SEPARATOR . basename($src);
+            if ($src && str_contains($src, 'minio.scielo.br/documentstore')) {
+                $filename = $path . DIRECTORY_SEPARATOR . basename(parse_url($src, PHP_URL_PATH));
                 if (file_exists($filename)) {
                     return;
                 }
@@ -241,8 +227,8 @@ class Article extends ArticleService
         });
         $crawler->filter('a')->each(function ($img) use ($path) {
             $src = $img->attr('href');
-            if (str_starts_with($src, "/media/assets/csp/")){
-                $filename = $path . DIRECTORY_SEPARATOR . basename($src);
+            if ($src && str_contains($src, 'minio.scielo.br/documentstore')) {
+                $filename = $path . DIRECTORY_SEPARATOR . basename(parse_url($src, PHP_URL_PATH));
                 if (file_exists($filename)) {
                     return;
                 }
@@ -281,11 +267,12 @@ class Article extends ArticleService
         //         }
         //     );
 
+        $absoluteUrl = str_starts_with($url, 'http') ? $url : $this->getBaseUrl() . $url;
         try {
             new AsyncResponse(
                 HttpClient::create(),
                 'GET',
-                $this->getBaseUrl() . $url,
+                $absoluteUrl,
                 [],
                 function ($chunk, AsyncContext $context) use ($fileHandler) {
                     if ($chunk->isLast()) {
@@ -324,6 +311,15 @@ class Article extends ArticleService
                 ]);
             }
         }
+        // Rewrite embedded figures to the local filename getAllAssets() saves them under -
+        // the OJS importer resolves embedded images as sibling dependent files by filename.
+        $imgCrawler = new Crawler('<div>' . $html . '</div>');
+        $imgCrawler->filter('img')->each(function (Crawler $img) use (&$html) {
+            $src = $img->attr('src');
+            if ($src && str_contains($src, 'minio.scielo.br/documentstore')) {
+                $html = str_replace($src, basename(parse_url($src, PHP_URL_PATH)), $html);
+            }
+        });
         $html = str_replace('{{body}}', $html, $this->getTemplate());
         file_put_contents($bodyFilename, $html);
     }
@@ -358,7 +354,6 @@ class Article extends ArticleService
                         }
                         $this->extractBody($crawler, $lang);
                         $this->getAllAssets($crawler);
-                        $this->incrementMetadata($crawler, $lang);
                         break;
                     case 'pdf':
                         $this->downloadBinaryAssync(
