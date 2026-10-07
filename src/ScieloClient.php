@@ -53,7 +53,7 @@ class ScieloClient
         'journal_slug' => null,
         'base_directory' => 'output',
         'https' => true,
-        'http_host' => 'www.scielosp.org',
+        'http_host' => 'www.scielo.br',
         'assets_folder' => 'assets',
         'logger' => null,
         'browser' => null,
