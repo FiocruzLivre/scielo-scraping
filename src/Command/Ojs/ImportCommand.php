@@ -391,7 +391,9 @@ class ImportCommand extends Command
         $publication->setData('status', Submission::STATUS_PUBLISHED);
         $publication->setData('issueId', $issue['issueId']);
         $publication->setData('locale', $this->normalizeLocale($this->identifyPrimaryLanguage($article)));
-        $publication->setData('pub-id::doi', $article->getDoi());
+        if ($article->getDoi()) {
+            $publication->setData('doiId', $this->getOrCreateDoiId($article->getDoi(), $journal->getId()));
+        }
         $publication->setData('copyrightYear', substr($article->getPublished(), 0, 4));
         $publication->setData('datePublished', $article->getPublished());
         $publication->setData('lastModified', $article->getUpdated());
@@ -526,6 +528,28 @@ class ImportCommand extends Command
             'default' => $default,
         ]);
         return $default;
+    }
+
+    /**
+     * OJS 3.4 moved DOIs out of publication_settings into their own `dois`
+     * table (publications.doiId is just the FK) - the 3.3-era
+     * setData('pub-id::doi', ...) this replaced is not part of the
+     * publication schema anymore, so it silently never persisted anything.
+     */
+    private function getOrCreateDoiId(string $doi, int $contextId): int
+    {
+        $existingId = Repo::doi()->getCollector()
+            ->filterByContextIds([$contextId])
+            ->filterByIdentifier($doi)
+            ->getIds()
+            ->first();
+        if ($existingId) {
+            return $existingId;
+        }
+        return Repo::doi()->add(Repo::doi()->newDataObject([
+            'doi' => $doi,
+            'contextId' => $contextId,
+        ]));
     }
 
     private function getSection($name)
