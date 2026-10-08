@@ -132,7 +132,14 @@ class Article extends ArticleService
             $this->setAuthors($authors);
         }
 
-        $lang = $this->extractLanguageMetadata($crawler, $listedLang, $id);
+        // citation_abstract on the main page reflects only the primary
+        // language - on the /abstract/ page for another language it just
+        // echoes the same (untranslated) text back, even when a real
+        // translation exists. The main page itself already carries every
+        // translated abstract directly, in .articleSection--{abstract,resumo,
+        // resumen} blocks, regardless of which language was requested.
+        $bodyAbstracts = $this->extractBodyAbstracts($crawler);
+        $lang = $this->extractLanguageMetadata($crawler, $listedLang, $id, $bodyAbstracts);
 
         $formats = ['pdf' => [$lang => "/j/{$journalSlug}/a/{$id}/?format=pdf&lang={$listedLang}"]];
         if ($crawler->filter('#standalonearticle')->count() > 0) {
@@ -156,7 +163,7 @@ class Article extends ArticleService
             $abstractUrl = "/j/{$journalSlug}/a/{$id}/abstract/?lang={$otherListedLang}&ilang=pt_BR";
             $abstractCrawler = $this->fetchPage($abstractUrl, $id);
             if ($abstractCrawler) {
-                $this->extractLanguageMetadata($abstractCrawler, $otherListedLang, $id);
+                $this->extractLanguageMetadata($abstractCrawler, $otherListedLang, $id, $bodyAbstracts);
             }
         }
 
@@ -193,7 +200,31 @@ class Article extends ArticleService
         return null;
     }
 
-    private function extractLanguageMetadata(Crawler $crawler, string $listedLang, string $id): string
+    /**
+     * Read each language's real abstract directly off the main article page -
+     * every translation SciELO has is rendered there (in a
+     * .articleSection--{abstract,resumo,resumen} block) regardless of which
+     * ?lang= was requested, unlike citation_abstract which only ever reflects
+     * the primary language.
+     */
+    private function extractBodyAbstracts(Crawler $crawler): array
+    {
+        $suffixToLocale = [
+            'abstract' => 'en_US',
+            'resumo' => 'pt_BR',
+            'resumen' => 'es_ES',
+        ];
+        $abstracts = [];
+        foreach ($suffixToLocale as $suffix => $locale) {
+            $paragraphs = $crawler->filter(".articleSection--{$suffix} p");
+            if ($paragraphs->count() > 0) {
+                $abstracts[$locale] = trim($paragraphs->first()->text());
+            }
+        }
+        return $abstracts;
+    }
+
+    private function extractLanguageMetadata(Crawler $crawler, string $listedLang, string $id, array $bodyAbstracts = []): string
     {
         $langMap = ['pt' => 'pt_BR', 'en' => 'en_US', 'es' => 'es_ES'];
         $lang = $langMap[$this->metaContent($crawler, 'citation_language') ?? $listedLang] ?? $listedLang;
@@ -205,7 +236,7 @@ class Article extends ArticleService
             $this->logger->error('Without Title', ['method' => 'Article::extractLanguageMetadata', 'id' => $id, 'lang' => $lang]);
         }
 
-        $abstract = $this->metaContent($crawler, 'citation_abstract');
+        $abstract = $bodyAbstracts[$lang] ?? $this->metaContent($crawler, 'citation_abstract');
         if ($abstract) {
             $this->setResume($abstract, $lang);
         }
