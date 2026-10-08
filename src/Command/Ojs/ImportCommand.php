@@ -490,17 +490,26 @@ class ImportCommand extends Command
      * Anything not listed here falls back to the --default-section option.
      */
     private const CATEGORY_SECTION_MAP = [
-        'research-article' => 'Artigo',
-        'review-article' => 'Revisão',
+        // SciELO's own TOC heading (from each article's XML <subj-group
+        // subj-group-type="heading">), confirmed against issue 1998.v14suppl3.
+        'articles' => 'Artigo',
+        'article' => 'Artigo',
+        'opinion' => 'Opinião',
         'editorial' => 'Editorial',
+        'research notes' => 'Notas',
+        'debate' => 'Debate',
+        'review' => 'Revisão',
         'letter' => 'Carta',
-        'brief-report' => 'Comunicação breve',
+        'interview' => 'Entrevista',
         'obituary' => 'Obituário',
         'retraction' => 'Retraction',
         'correction' => 'Errata',
         'article-commentary' => 'Comentários',
-        'interview' => 'Entrevista',
-        // hardcoded fallback value from the one-off issue-66 recovery script
+        // citation_article_type fallback values (used only if the XML heading
+        // can't be fetched) and the one-off issue-66 recovery script's hardcode
+        'research-article' => 'Artigo',
+        'review-article' => 'Revisão',
+        'brief-report' => 'Notas',
         'artigo' => 'Artigo',
     ];
 

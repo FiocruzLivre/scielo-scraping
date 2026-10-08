@@ -100,7 +100,14 @@ class Article extends ArticleService
             return $this;
         }
         $this->setDoi($doi);
-        $this->setCategory(strtolower($this->metaContent($crawler, 'citation_article_type') ?: 'article'));
+        // citation_article_type is a coarse, generic JATS vocabulary that lumps
+        // SciELO's own finer TOC section labels together (e.g. both "Opinion"
+        // and "Editorial" pieces are tagged citation_article_type=editorial) -
+        // the article's own XML metadata carries the exact heading printed in
+        // the issue's table of contents, which is what importers actually need
+        // to pick the right journal section.
+        $heading = $this->extractSectionHeading($journalSlug, $id, $listedLang);
+        $this->setCategory($heading ?: strtolower($this->metaContent($crawler, 'citation_article_type') ?: 'article'));
 
         $pubDate = $this->metaContent($crawler, 'citation_publication_date');
         if ($pubDate) {
@@ -171,6 +178,19 @@ class Article extends ArticleService
             $this->logger->error('timeout', ['method' => 'Article::loadFromArticlePage', 'id' => $id, 'url' => $url]);
             return null;
         }
+    }
+
+    private function extractSectionHeading(string $journalSlug, string $id, string $listedLang): ?string
+    {
+        $url = "/j/{$journalSlug}/a/{$id}/?format=xml&lang={$listedLang}";
+        if (!$this->fetchPage($url, $id)) {
+            return null;
+        }
+        $raw = $this->getBrowser()->getResponse()->getContent();
+        if (preg_match('/<subj-group subj-group-type="heading">\s*<subject>([^<]*)<\/subject>/', $raw, $m)) {
+            return trim($m[1]);
+        }
+        return null;
     }
 
     private function extractLanguageMetadata(Crawler $crawler, string $listedLang, string $id): string
