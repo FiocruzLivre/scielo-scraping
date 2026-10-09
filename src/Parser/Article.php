@@ -409,6 +409,15 @@ class Article extends ArticleService
                 $html = str_replace($src, basename(parse_url($src, PHP_URL_PATH)), $html);
             }
         });
+        // The vendored scielo-bundle-min.js this content is served alongside
+        // (assets/template.html) is a stale snapshot built for Bootstrap 4
+        // (data-toggle/data-target/data-dismiss) - but the current
+        // www.scielo.br site's own markup already moved on to Bootstrap 5's
+        // data-bs-* convention, which that bundle's JS never wires up any
+        // click handlers for. Downgrading the attributes here is cheaper
+        // and more reliable than keeping a third-party JS bundle in sync.
+        $html = str_replace('data-bs-', 'data-', $html);
+
         $html = str_replace('{{body}}', $html, $this->getTemplate());
         file_put_contents($bodyFilename, $html);
     }
