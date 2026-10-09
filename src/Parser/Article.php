@@ -409,30 +409,6 @@ class Article extends ArticleService
                 $html = str_replace($src, basename(parse_url($src, PHP_URL_PATH)), $html);
             }
         });
-
-        // The figure "open in modal" triggers rely on SciELO's own JS
-        // (template.html no longer references it - it's a site-relative
-        // path that breaks once re-hosted under OJS) and are otherwise just
-        // inert anchors with no real href. Point them directly at the same
-        // locally-rewritten image shown in the modal, so clicking opens it
-        // (in a new tab) instead of doing nothing.
-        $imgCrawler->filter('[id^="ModalFigfigure"]')->each(function (Crawler $modal) use (&$html) {
-            $modalId = $modal->attr('id');
-            $images = $modal->filter('img');
-            if ($images->count() === 0) {
-                return;
-            }
-            $src = $images->first()->attr('src');
-            if (str_contains($src, 'minio.scielo.br/documentstore')) {
-                $src = basename(parse_url($src, PHP_URL_PATH));
-            }
-            $html = preg_replace(
-                '/<a\s+(?:href[^ >]*\s+)?(data-bs-toggle="modal"\s+data-bs-target="#' . preg_quote($modalId, '/') . '")/',
-                '<a href="' . $src . '" target="_blank" $1',
-                $html
-            );
-        });
-
         $html = str_replace('{{body}}', $html, $this->getTemplate());
         file_put_contents($bodyFilename, $html);
     }
