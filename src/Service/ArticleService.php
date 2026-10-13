@@ -175,7 +175,7 @@ class ArticleService
             return;
         }
         if (!is_dir($outputDir)) {
-            mkdir($outputDir, 0666, true);
+            mkdir($outputDir, 0755, true);
         }
         $filename = $this->getMetadataFilename();
         file_put_contents(

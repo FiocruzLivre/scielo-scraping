@@ -442,7 +442,7 @@ class Article extends ArticleService
             foreach ($data as $lang => $url) {
                 $path = $this->getBasedir() . DIRECTORY_SEPARATOR . $this->getBinaryDirectory();
                 if (!is_dir($path)) {
-                    mkdir($path, 0666, true);
+                    mkdir($path, 0755, true);
                 }
                 switch ($format) {
                     case 'text':

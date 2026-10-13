@@ -118,7 +118,7 @@ class ScieloClient
             ];
         });
         if (!is_dir($this->settings['base_directory'])) {
-            mkdir($this->settings['base_directory'], 0666);
+            mkdir($this->settings['base_directory'], 0755);
         }
         ksort($grid);
         file_put_contents($this->settings['base_directory'] . DIRECTORY_SEPARATOR . 'grid.json', json_encode($grid));
@@ -200,7 +200,7 @@ class ScieloClient
             [$this->settings['base_directory'], $year, $volume, $issueName]
         );
         if (!is_dir($basepath)) {
-            mkdir($basepath, 0666, true);
+            mkdir($basepath, 0755, true);
         }
         $htmlFile = $basepath . DIRECTORY_SEPARATOR . $this->settings['default_language'] . '.html';
         if (file_exists($htmlFile)) {
