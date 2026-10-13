@@ -28,7 +28,7 @@ class Application extends BaseApplication
         parent::doRun($input, $output);
     }
 
-    public function getHelp()
+    public function getHelp(): string
     {
         return <<<HELP
             SciELO downloader
@@ -40,7 +40,7 @@ class Application extends BaseApplication
     /**
      * Initializes all commands.
      */
-    protected function getDefaultCommands()
+    protected function getDefaultCommands(): array
     {
         $commands = array_merge(parent::getDefaultCommands(), [
             new DownloadMetadataCommand(),
